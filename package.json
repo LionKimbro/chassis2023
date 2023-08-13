@@ -1,0 +1,34 @@
+{
+  "APPID": {
+    "GUID": "4643ce7d-6bfc-4162-9560-10857191b445",
+    "TAGURI": "lionkimbro@gmail.com,2023-08-01:project:chassis2023",
+    "NAME": "chassis2023",
+    "TITLE": "Chassis 2023",
+    "TAGS": "python module program23 program2023 chassis chassis2023",
+    "DESC": "Lion's platform for writing Python programs, assembling cooperating programs, packaging them, and distributing them via pip."
+  },
+  "PACKAGE": {
+    "DISTRIBUTIONNAME": "chassis2023",
+    "VERSION": "0.1.0",
+    "CLASSIFIERS": [
+      "Programming Language :: Python :: 3",
+      "License :: OSI Approved :: MIT License",
+      "Operating System :: OS Independent"
+    ],
+    "EXECUTIONTYPE": "LIBRARY",
+    "DEPENDENCIES": []
+  },
+  "CHASSIS2023": {
+    "LOGRINGLEN": 20
+  },
+  "FACTORY2023": {
+    "PROJECTID": "0106"
+  },
+  "GITHUB": {
+      "NAME": "chassis2023"
+  },
+  "MODULES": [],
+  "RESOURCES": [],
+  "SNOWFLAKES": [],
+  "CONFIG": []
+}
