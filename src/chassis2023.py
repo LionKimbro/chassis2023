@@ -6,70 +6,15 @@ import json
 import importlib
 import inspect
 
-import snowflakes
+from . import snowflakes
 
+from .exceptions import WasLocked, WasNotLocked
 
-# --[ core symbols ]----------------------------------------------------
-
-kSYMBOLS = """
-PROGRAMDATA
-APPID
-  GUID TAGURI NAME TITLE TAGS DESC
-PROGRAM
-  EXECUTIONTYPE CLITOOL WEBSERVER FILETALKSERVER
-                TKINTERGUI INTERACTIVEMENU
-  LOGRINGLEN
-MODULES
-  NAMES FILES DIRS
-RESOURCES
-
-SYMBOLS IMPORTSYMBOLS CONFIG MODULES RESOURCES SNOWFLAKES
-
-MODULES NRUNMODULES
-
-NAME FILE DIR
-
-MI_SRC
-STAGE
-RUNMODULE
-
-INIT SETUP LOAD POSTLOAD INTERLINK
-RUNSTART RUNSTOP
-PRECLOSE SAVE POSTSAVE TEARDOWN
-
-NOTE DBG WARN ERR
-  BADPROGRAMDATA TOOMANYRUNMODULES NORUNMODULE
-TIME SRC TYPE CODE TITLE MSG
-"""
-
-symbols_from_module = {}  # module name -> symbols
-
-def intern_symbols(s):
-    """Split a string and intern each part of it."""
-    return [sys.intern(sym) for sym in s.split()]
-
-def inject_symbols(module, L):
-    """Inject each symbol in L into module.
-    
-    BE SURE that the elements of L have already been interned;
-    That is NOT taken care of by this routine.
-    """
-    for sym in L:
-        setattr(module, sym, sym)
-
-def setup_symbols():
-    symbols = intern_symbols(kSYMBOLS)
-    symbols_from_module["chassis2023"] = symbols
-    me = sys.modules[__name__]
-    inject_symbols(me, symbols_from_module["chassis2023"])
 
 
 # --[ globals ]---------------------------------------------------------
 
 g = {}
-
-class ChassisException(Exception): pass
-
 
 def setup_g():
     g.update({
@@ -78,6 +23,7 @@ def setup_g():
         RUNMODULE: None,
         STAGE: None
     })
+
 
 # --[ execution types ]-------------------------------------------------
 
@@ -111,21 +57,7 @@ def setup_execution_types():
         execution_types[D[NAME]] = D
 
 
-# --[ utility ]---------------------------------------------------------
-
-def timestamp():
-    "Return a UTC ISO-8601 timestamp as a string."
-    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
-
-
 # --[ security ]--------------------------------------------------------
-
-class BrokenPromise(Exception): pass
-
-class WasLocked(BrokenPromise): pass
-
-class WasNotLocked(BrokenPromise): pass
-
 
 locks = set()
 
