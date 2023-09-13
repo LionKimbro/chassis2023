@@ -5,24 +5,35 @@ import time
 import json
 import importlib
 import inspect
+import argparse
+import pathlib
 
 from . import snowflakes
 
-from .exceptions import WasLocked, WasNotLocked
+from .exceptions import ChassisException, BadPackageFile, BadPackageFileValue
+from .exceptions import BrokenPromise, WasLocked, WasNotLocked, BadState
 
 
 
 # --[ globals ]---------------------------------------------------------
 
-g = {}
+g = {}  # call reset_g() before use
 
-def setup_g():
-    g.update({
-        PROGRAMDATA: None,
-        MI_SRC: None,
-        RUNMODULE: None,
-        STAGE: None
-    })
+config = {}  # config populated from CLI
+
+def reset():
+    """completely reset for execution"""
+    config.clear()
+    reset_g()
+    setup_execution_types()
+
+def reset_g():
+    g["PACKAGE_NAME"] = None  # core package (string name of package)
+    g["PACKAGE_JSON_DATA"] = None  # package.json content loaded from package
+    g["EXECINFO"] = None  # matching entry in execution_types_L
+    g["STAGE"] = None  # presently active stage (str, options)
+    g["HOST"] = None  # for specific execution modes (str, IP addr)
+    g["PORT"] = None  # for specific execution modes (int, TCP port)
 
 
 # --[ execution types ]-------------------------------------------------
@@ -30,28 +41,36 @@ def setup_g():
 execution_types_L = []
 execution_types = {}  # NAME -> dict
 
+# flags: "H" -- collects a HOST/PORT pair
+
 def setup_execution_types():
     execution_types_L[:] = [
-        {NAME: CLITOOL,
-         MODULES: {},
-         NRUNMODULES: 1},
+        {"NAME": "CLITOOL",
+         "FLAGS": "",
+         "EXECFN": None},
         
-        {NAME: WEBSERVER,
-         MODULES: {},
-         NRUNMODULES: 0},
+        {"NAME": "JSONWEBSERVICE",
+         "FLAGS": "H",
+         "EXECFN": execute_jsonwebservice},
         
-        {NAME: FILETALKSERVER,
-         MODULES: {},
-         NRUNMODULES: 0},
+        {"NAME": "TCPSERVICE",
+         "FLAGS": "H",
+         "EXECFN": None},
+
+        {"NAME": "FILETALKSERVER",
+         "FLAGS": "",
+         "EXECFN": None},
         
-        {NAME: TKINTERGUI,
-         MODULES: {NAMES: ["tk23top", "tk23symbols", "tk23util", "tk23builder", "tk23base"]},
-         NRUNMODULES: 0},
+        {"NAME": "TKINTERGUI",
+         "FLAGS": "",
+         "EXECFN": None},
         
-        {NAME: INTERACTIVEMENU,
-         MODULES: {},
-         NRUNMODULES: 0}
+        {"NAME": "INTERACTIVEMENU",
+         "FLAGS": "",
+         "EXECFN": None}
     ]
+    
+    execution_types.clear()
     
     for D in execution_types_L:
         execution_types[D[NAME]] = D
@@ -80,199 +99,6 @@ def req(key):
 def forbid(key):
     if key in locks:
         raise WasLocked(key)
-
-
-# --[ programdata.json ]------------------------------------------------
-
-kPROGRAMDATA_FILENAME = "programdata.json"
-
-def load_programdata():
-    f = open(kPROGRAMDATA_FILENAME, "r", encoding="utf-8")
-    g[PROGRAMDATA] = json.loads(f.read())
-
-def save_programdata():
-    """rarely called"""
-    f = open(kPROGRAMDATA_FILENAME, "w", encoding="utf-8")
-    f.write(json.dumps(g[PROGRAMDATA]))
-
-def execution_type_D():
-    """assumption: PROGRAMDATA loaded, EXECUTIONTYPE properly configured
-    
-    intended for internal use only
-    """
-    exectype = g[PROGRAMDATA][PROGRAM][EXECUTIONTYPE]
-    return execution_types[exectype]
-
-
-# --[ modules ]---------------------------------------------------------
-
-kMODULE_INFO = "kMODULE_INFO"  # varname for module info
-
-modules = []  # all modules known about
-pulsers = []  # optimization: modules found to have a pulse() fn
-
-
-# --[ module intake ]---------------------------------------------------
-#
-# This code, prefixed with mi_, is entirelty internal, and for the purpose
-# of gathering all of the modules that will be used by the program during
-# execution.  This is a one time process.  None of this should be called
-# by any other code; it's an entirely self-contained chunk of code.
-# The entry is: "gather_modules", and it is called once.
-
-mi_toprocess = []  # (mi_kind, mi_addr)  mi_kind:NAME,FILE,DIR mi_addr:name or path
-mi_processed = []
-
-mi_recently_processed = []  # modules, to be mined for cascading
-mi_processing_sources = {}  # (kind,addr) -> source description string
-
-# mi_processing_sources is purely for debugging, tracability
-
-class ChassisModuleNotFoundError(ChassisException): pass
-
-def mi_register_module(module):
-    """Add a module to modules list."""
-    if module not in modules:  # safeguard: no double-imports
-        modules.append(module)
-        mi_recently_processed.append(module)
-
-def mi_import_module_from_name(module_name):
-    try:
-        module = importlib.import_module(module_name)
-        mi_register_module(module)
-    except ModuleNotFoundError:
-        src = mi_processing_sources[(NAME, module_name)]
-        raise ChassisModuleNotFoundError(module_name, src)
-
-
-def mi_import_module_from_path(module_path):
-    # Extract the module name from the filepath
-    module_name = os.path.splitext(os.path.basename(module_path))[0]
-    
-    # Load the module from the filepath
-    try:
-        spec = importlib.util.spec_from_file_location(module_name, module_path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        mi_register_module(module)
-    except ModuleNotFoundError:
-        src = mi_processing_sources.get((FILE, module_path))
-        if src is None:
-            src = mi_processing_sources.get((DIR, module_path))
-        raise ChassisModuleNotFoundError(module_path, src)
-
-def mi_import_modules_from_dir(dir_path):
-    # Iterate over the files in the directory
-    for filename in os.listdir(dir_path):
-        # Check if the file is a .py or .pyc module
-        if filename.endswith('.py') or filename.endswith('.pyc'):
-            # Load the module from the filepath
-            module_path = os.path.join(dir_path, filename)
-            mi_import_module_from_path(module_path)
-
-
-def gather_modules():
-    # This has to be called once, and only once.
-    # The modules list is assembled once, and is never modified after.
-    lock("CALLED:chassis2023.gather_modules")
-    mi_seed_from_programdata()
-    mi_seed_from_executiontype()
-    mi_cascade_processing()
-
-def mi_seed_from_programdata():
-    lock("CALLED:chassis2023.mi_seed_from_programdata")
-    mi_register_to_process(g[PROGRAMDATA][MODULES], "programdata.json")
-
-def mi_seed_from_executiontype():
-    lock("CALLED:chassis2023.mi_seed_from_executiontype")
-    mi_register_to_process(execution_type_D()[MODULES],
-                           "execution type: "+execution_type_D()[NAME])
-
-def mi_cascade_processing():
-    lock("CALLED:chassis2023.mi_cascade_processing")
-    while mi_processing_remains():
-        (kind, s) = mi_next_toprocess()
-        mi_dispatch_processing(kind, s)
-        mi_rollover_toprocess()  # move to process->processed
-        for mod in mi_recently_processed:
-            spec = getattr(mod, kMODULE_INFO, {}).get(MODULES, {})
-            mi_register_to_process(spec, mod)
-        mi_recently_processed[:] = []
-
-
-def mi_register_to_process(spec, source_desc):
-    g[MI_SRC] = source_desc
-    for p in spec.get(DIRS, []):
-        mi_register_one(DIR, p)
-    for p in spec.get(FILES, []):
-        mi_register_one(FILE, p)
-    for name in spec.get(NAMES, []):
-        mi_register_one(NAME, name)
-
-def mi_register_one(kind, s):
-    tup = (kind, s)
-    if tup in mi_toprocess: return
-    if tup in mi_processed: return
-    mi_toprocess.append(tup)
-    mi_processing_sources[tup] = g[MI_SRC]
-
-def mi_processing_remains():
-    return len(mi_toprocess) > 0
-
-def mi_next_toprocess():
-    return mi_toprocess[-1]
-
-def mi_dispatch_processing(kind, s):
-    if kind == NAME:
-        mi_import_module_from_name(s)
-    elif kind == FILE:
-        mi_import_module_from_path(s)
-    elif kind == DIR:
-        mi_import_modules_from_dir(s)
-
-def mi_rollover_toprocess():
-    mi_processed.append(mi_toprocess.pop())
-
-
-def find_runmodule():
-    lock("CALLED:chassis2023.find_runmodule()")
-    too_many_found = False
-    has_run = []
-    for module in modules:
-        if getattr(module, "run", None):
-            has_run.append(module)
-    need = execution_type_D()[NRUNMODULES]  # how many needed?
-    if len(has_run) == need:
-        if need == 1:
-            g[RUNMODULE] = has_run[0]
-    elif len(has_run) > need:
-        register_error(TOOMANYRUNMODULES, MODULES=has_run)
-    elif len(has_run) < need:
-        register_error(NORUNMODULE)
-
-def find_pulsers():
-    lock("CALLED:chassis2023.find_pulsers()")
-    for module in modules:
-        if getattr(module, "pulse", None):
-            pulsers.append(module.pulse)
-
-
-def inject_module_symbols():
-    for mod in modules:
-        symbols = intern_symbols(getattr(mod, kMODULE_INFO, {}).get("SYMBOLS"))
-        inject_symbols(mod, symbols)
-        symbols_from_module[mod.__name__] = symbols
-    for mod in modules:
-        requests = getattr(mod, kMODULE_INFO, {}).get("IMPORTSYMBOLS", [])
-        for req in requests:
-            inject_symbols(mod, symbols_from_module[req])
-
-
-def define_snowflakes():
-    for mod in modules:
-        definitions = getattr(mod, kMODULE_INFO, {}).get("SNOWFLAKES", [])
-        for _def in definitions:
-            snowflakes.define(_def)
 
 
 # --[ logging ]---------------------------------------------------------
@@ -353,112 +179,225 @@ def print_ringlogs():
         print()
 
 
-# --[ internal error code ]---------------------------------------------
-
-def register_error(code, **data):
-    """Internal function -- register this error, per whatever mechanisms."""
-    if code == TOOMANYRUNMODULES:
-        ttl = "Too Many Run Modules"
-        msg = "There should only be one module with run() defined in it,\n"
-        msg += "But these modules all define run():\n"
-        for module in data[MODULES]:
-            msg += "  " + str(module) + "\n"
-        log(ERR, code, ttl, msg)
-    elif code == NORUNMODULE:
-        ttl = "No Run Module"
-        msg = "run() was not defined in any of the imported modules:\n"
-        for module in modules:
-            msg += "  " + str(module) + "\n"
-        if not modules:
-            msg += "  (no modules)\n"
-        log(ERR, code, ttl, msg)
-    else:
-        raise ValueError(code)
-
-
-# --[ program data ]----------------------------------------------------
-
-kPROGRAMDATA_FILENAME = "programdata.json"
-
-def load_programdata():
-    f = open(kPROGRAMDATA_FILENAME, "r", encoding="utf-8")
-    g[PROGRAMDATA] = json.loads(f.read())
-
-
-def save_programdata():
-    f = open(kPROGRAMDATA_FILENAME, "w", encoding="utf-8")
-    f.write(json.dumps(g[PROGRAMDATA]))
-
-
-# --[ primary execution ]-----------------------------------------------
-
-def setup():
-    setup_symbols()
-    setup_execution_types()
-    setup_g()
-
-def run():
-    perform_prep()
-#    if errors:
-#        print_errors_report()
-#        return
-    perform_setup()
-    perform_run()
-    perform_teardown()
-
-
-def perform_prep():
-    load_programdata()
-    gather_modules()
-    find_runmodule()
-    find_pulsers()
-    inject_module_symbols()
-    define_snowflakes()
-
-def perform_setup():
-    perform_stage(INIT)
-    if execution_type_D()[NAME] == TKINTERGUI:
-        import tk23base
-        tk23base.setup()
-    perform_stage(SETUP)
-    #resources.load()
-    perform_stage(LOAD)
-    perform_stage(POSTLOAD)
-    perform_stage(INTERLINK)
-
-def perform_run():
-    perform_stage(RUNSTART)
-    if g[RUNMODULE]:
-        g[RUNMODULE].run()
-    elif execution_type_D()[NAME] == TKINTERGUI:
-        import tk23process
-        tk23process.run()
-    perform_stage(RUNSTOP)
-
-def perform_teardown():
-    perform_stage(PRECLOSE)
-    perform_stage(SAVE)
-    #resources.save()
-    perform_stage(POSTSAVE)
-    perform_stage(TEARDOWN)
-
-def perform_stage(stage):
-    g[STAGE] = stage
-    for m in modules:
-        fn = getattr(m, "stage", None)
-        if fn:
-            fn()
-
-def pulse():
-    for fn in pulsers:
-        fn()
-
-
-# NOTE:
-#   there is NO if __name__ == "__main__" block here, on purpose;
-#     if this was run directly,
-#     then imports of chassis2023 would load another module
-#     due to a strange vagary of Python's;
-#     so write a go.py that imports chassis2023 and then
-#     calls the run() routine
+# --[ run_package execution ]-------------------------------------------
 #
+# In the case of beginning with run_package(package_name), the package
+# runs the program like so:
+#
+# -- __main__.py -------------------------
+# import chassis2023
+#
+# chassis2023.run_package(__package__)
+# ----------------------------------------
+#
+# The value of __package__ will be a string.  It will not end in ".py"
+# or anything like that.
+#
+# The package will have a file databytes.py, that will contain the file
+# data with the package.json contents within it, that it was created
+# with.
+#
+# It will be JSON decoded, and then the EXECUTIONTYPE key will be looked
+# up:
+#
+# {
+#   "CHASSIS2023": {
+#     "EXECUTIONTYPE": "WEBSERVER" (or what not)
+#   }
+# }
+#
+# 
+
+def package_module(module_name):
+    """Return the entry module for a named Python package.
+
+    It can include "." as separators.
+    
+    Assumptions: -- "if package_module() is called, the following is true..."
+    * PACKAGE_NAME has been set, and points to an actual package.
+    """
+    module_path = g["PACKAGE_NAME"] + "." + module_name
+    return importlib.import_module(module_path)
+
+def populate_PACKAGE_JSON_DATA():
+    """only call from run_package
+    
+    Assumptions: -- "if populate_PACKAGE_JSON_DATA() is called, the following is true..."
+    * PACKAGE_NAME has been set
+    """
+    g["PACKAGE_JSON_DATA"] = json.loads(package_module("databytes").files["package.json"])
+
+def populate_EXECINFO():
+    """only call from run_package
+    
+    Assumptions: -- "if populate_EXECINFO() is called, the following is true..."
+    * PACKAGE_JSON_DATA has been loaded and populated
+    * PACKAGE_JSON_DATA is well-formed; in particular, the EXECINFO type is valid
+    * execution_types_L has been properly loaded and initialized
+    """
+    key = g["PACKAGE_JSON_DATA"]["CHASSIS2023"]["EXECUTIONTYPE"]
+    for D in execution_types_L:
+        if D["NAME"] == key:
+            g["EXECINFO"] = D
+            return
+    raise BadState("bad EXECINFO values should have been caught before calling")
+
+def run_package(package_name):
+    """single entry port from a chassis2023 program"""
+    setup()
+    reset_g()
+
+    # establish basic information
+    g["PACKAGE_NAME"] = package_name
+    populate_PACKAGE_JSON_DATA()   # PACKAGE_NAME must be set, before this is called
+    populate_EXECINFO()
+
+    # collect information from command line
+    collect_cli_data()
+
+    # if all required information is present, commence execution
+    execute()
+
+def execute():
+    """only call from run_package(...) -- at least, for now
+    
+    Assumptions: -- "if execute() is called, the following is true..."
+    * PACKAGE_NAME is valid,
+    * PACKAGE_JSON_DATA is loaded,
+    * the config dictionary has been populated
+    * no stages have been executed yet
+    * it is time to run the program
+    """
+    g["EXECINFO"]["EXECFN"]()
+
+
+# --[ CHASSIS2023.EXECUTIONTYPE: JSONWEBSERVICE ]----------------------
+
+class RequestHandler(BaseHTTPRequestHandler):
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+
+    def do_POST(self):
+        content_length = int(self.headers['Content-Length'])
+        post_data = self.rfile.read(content_length).decode('utf-8')
+        data = json.loads(post_data)
+
+        # TODO: wrap this in a try...except block, and handle a failure in a defined way
+        response = package_module("handler").handle(data)
+        
+        # Respond with a success status code
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Content-type', 'application/json')
+        self.end_headers()
+        
+        self.wfile.write(json.dumps(response).encode('utf-8'))
+        
+    def log_message(self, format, *args):
+        """Override log_message to suppress logging output."""
+        pass
+
+
+def execute_jsonwebservice():
+    """Called ONLY by execute(), via EXECFN."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    
+    server_address = (g["HOST"], g["PORT"])
+    
+    httpd = HTTPServer(server_address, RequestHandler)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("Server terminated by user.")
+
+
+# --[ CLI processor ]---------------------------------------------------
+# 2023-08-25
+
+# 2023-08-25 -- this organizational information can be relocated
+#
+# Parts:
+# - Command Line Processor   [ WRITTEN ]
+#   - assembly
+#   - collection from arguments
+#
+# - Global Config Dictionary
+#   - storing values in it
+#   - verifying requirements are met
+#       req_package_json_data_loaded() => (None) [raise]
+#       req_package_json_config_well_formatted() => (None) [raise]
+#       options_match(supplied_str, specific_config_dict_w_options) => x [raise]
+#
+# - Alert/Err/Deprecation/Notice Logging System
+#   - transfer the Factory system?
+# - Context System
+
+
+def options_match(option_str, conf_dict):
+    """Match an option str, against a configuration dictionary's options."""
+    for option_entry in conf_dict["OPTIONS"]:
+        if str(option_entry) == option_str:
+            return option_entry
+
+def collect_cli_data():
+    """Collect CLI data from the command line invocation.
+
+    Assumptions: -- "if collect_cli_data() is called, the following is true..."
+    * there WAS a CLI command line invocation
+    * PACKAGE_JSON_DATA has been loaded -- that information is relied on
+    * PACKAGE_JSON_DATA is well-formed
+      NOTE: this assumption is NOT well-made, presently;
+            I intend to write the code to ensure that PACKAGE_JSON_DATA is well-formed,
+            I just haven't written it yet.
+            But I don't want to clutter this code with checks and checking.
+            THIS code should be written in the assumption that data is well-formed.
+    
+    Returns:
+    * None -- success
+    * exception -- something unexpected happened, likely a bug
+    
+    Requires from PACKAGE_JSON_DATA:
+    * APPID.TITLE
+    """
+    pkg_data = g["PACKAGE_JSON_DATA"]  # shortcut
+    
+    # create and populate parser
+    parser = argparse.ArgumentParser(description=pkg_data["APPID"]["TITLE"])
+    
+    # prompt execution-type dependent options
+    if "H" in g["EXECINFO"]["FLAGS"]::
+        parser.add_argument("--host", type=str, help="host address to run server on", default="127.0.0.1")
+        parser.add_argument("--port", type=int, help="port to run srever on", default=80)
+    
+    # prompt package-specified options
+    for D in pkg_data.get("CONFIG", []):
+        type_fn = {"STR": str,
+                   "INT": int,
+                   "PATH": pathlib.Path,
+                   "FLOAT": float,
+                   "BOOL": bool,
+                   "OPTION": lambda s: options_match(s, D)}[D["TYPE"]]  # /!\ options_match NOT IMPLEMENTED YET
+        parser.add_argument(f"""--{D["NAME"]}""",
+                            type=type_fn,
+                            help=D["DESC"],
+                            default=D["DEFAULT"])
+    
+    # parse arguments
+    args = parser.parse_args()
+    
+    # place execution-type dependent options
+    if "H" in g["EXECINFO"]["FLAGS"]:
+        g["HOST"] = args.host
+        g["PORT"] = args.port
+    
+    # place package-specified options
+    for D in pkg_data.get("CONFIG", []):
+        config[D["NAME"]] = getattr(args, D["NAME"])
+    
+    # return Success
+    return True
+
