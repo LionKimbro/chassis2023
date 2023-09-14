@@ -8,6 +8,8 @@ import inspect
 import argparse
 import pathlib
 
+from http.server import BaseHTTPRequestHandler, HTTPServer
+    
 from . import snowflakes
 
 from .exceptions import ChassisException, BadPackageFile, BadPackageFileValue
@@ -32,8 +34,6 @@ def reset_g():
     g["PACKAGE_JSON_DATA"] = None  # package.json content loaded from package
     g["EXECINFO"] = None  # matching entry in execution_types_L
     g["STAGE"] = None  # presently active stage (str, options)
-    g["HOST"] = None  # for specific execution modes (str, IP addr)
-    g["PORT"] = None  # for specific execution modes (int, TCP port)
 
 
 # --[ execution types ]-------------------------------------------------
@@ -41,7 +41,7 @@ def reset_g():
 execution_types_L = []
 execution_types = {}  # NAME -> dict
 
-# flags: "H" -- collects a HOST/PORT pair
+# flags: "H" -- requires a HOST/PORT pair
 
 def setup_execution_types():
     execution_types_L[:] = [
@@ -73,7 +73,7 @@ def setup_execution_types():
     execution_types.clear()
     
     for D in execution_types_L:
-        execution_types[D[NAME]] = D
+        execution_types[D["NAME"]] = D
 
 
 # --[ security ]--------------------------------------------------------
@@ -244,8 +244,7 @@ def populate_EXECINFO():
 
 def run_package(package_name):
     """single entry port from a chassis2023 program"""
-    setup()
-    reset_g()
+    reset()
 
     # establish basic information
     g["PACKAGE_NAME"] = package_name
@@ -303,10 +302,12 @@ class RequestHandler(BaseHTTPRequestHandler):
 
 
 def execute_jsonwebservice():
-    """Called ONLY by execute(), via EXECFN."""
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+    """Called ONLY by execute(), via EXECFN.
     
-    server_address = (g["HOST"], g["PORT"])
+    Assumptions:
+    * HOST and PORT are configured
+    """
+    server_address = (config["HOST"], config["PORT"])
     
     httpd = HTTPServer(server_address, RequestHandler)
     try:
@@ -368,11 +369,6 @@ def collect_cli_data():
     # create and populate parser
     parser = argparse.ArgumentParser(description=pkg_data["APPID"]["TITLE"])
     
-    # prompt execution-type dependent options
-    if "H" in g["EXECINFO"]["FLAGS"]::
-        parser.add_argument("--host", type=str, help="host address to run server on", default="127.0.0.1")
-        parser.add_argument("--port", type=int, help="port to run srever on", default=80)
-    
     # prompt package-specified options
     for D in pkg_data.get("CONFIG", []):
         type_fn = {"STR": str,
@@ -388,11 +384,6 @@ def collect_cli_data():
     
     # parse arguments
     args = parser.parse_args()
-    
-    # place execution-type dependent options
-    if "H" in g["EXECINFO"]["FLAGS"]:
-        g["HOST"] = args.host
-        g["PORT"] = args.port
     
     # place package-specified options
     for D in pkg_data.get("CONFIG", []):
